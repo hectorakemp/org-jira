@@ -407,6 +407,21 @@ Valid org-jira fields you can use:
   :group 'org-jira
   :type '(alist :key-type symbol :value-type symbol))
 
+(defcustom org-jira-issue-dev-status-fetch-p nil
+  "If non-nil, show dev status with each issue.
+
+This incurs a small delay as the dev status is fetched with each issue found.
+The displayed dev status is read-only and cannot be synced."
+  :group 'org-jira
+  :type 'boolean)
+
+(defcustom org-jira-issue-dev-status-application-type 'github
+  "Application type for dev status.
+
+Known values are 'github and 'bitbucket."
+  :group 'org-jira
+  :type 'symbol)
+
 (defvar org-jira-serv nil
   "Parameters of the currently selected blog.")
 
@@ -1292,7 +1307,7 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
   (when (and value (not (string= value "")))
     (org-jira-entry-put (point) name value)))
 
-(defun org-jira--render-issue-headline (issue-id filename heading body)
+(defun org-jira--render-issue-headline (issue-id filename heading callback)
   "Renders HEADING and BODY as an Org headline at point.
 
 ISSUE-ID and FILENAME allow linking back to the relevant Jira issue."
@@ -1315,12 +1330,25 @@ ISSUE-ID and FILENAME allow linking back to the relevant Jira issue."
             (goto-char (point-max))
             (org-insert-subheading t))
           (org-jira-insert entry-heading "\n"))
+        (funcall callback))))
 
-        ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
-        (org-jira-insert
-         (replace-regexp-in-string
-          "^" "  "
-          (format "%s" body))))))
+(defun org-jira--render-dev-status (dev-status)
+  "Format DEV-STATUS as a headline body."
+  (let* ((detail (car (append (org-jira-sdk-path dev-status '(detail)) nil)))
+         (branches (org-jira-sdk-path detail '(branches)))
+         (pull-requests (org-jira-sdk-path detail '(pullRequests))))
+    (org-insert-subheading t)
+    (org-jira-insert "Branches" "\n")
+    (org-jira-insert
+     (replace-regexp-in-string
+      "^" "  "
+      (json-encode branches)))
+    (org-insert-heading)
+    (org-jira-insert "Pull Requests" "\n")
+    (org-jira-insert
+     (replace-regexp-in-string
+      "^" "  "
+      (json-encode pull-requests)))))
 
 (defun org-jira--render-issue (Issue)
   "Render single ISSUE."
@@ -1374,12 +1402,27 @@ ISSUE-ID and FILENAME allow linking back to the relevant Jira issue."
                 (when (> (length duedate) 0)
                   (org-deadline nil duedate))))
 
+            (when org-jira-issue-dev-status-fetch-p
+              (let* ((issue-id-int (slot-value Issue 'issue-id-int))
+                     (application-type (if (eq org-jira-issue-dev-status-application-type 'bitbucket) "BitBucket" "GitHub"))
+                     (dev-status (jiralib-get-issue-dev-status issue-id-int application-type "pullrequest")))
+                (org-jira--render-issue-headline
+                 issue-id
+                 filename
+                 "Development"
+                 (lambda () (org-jira--render-dev-status dev-status)))))
+
             (let ((headlines (org-jira--get-items-to-render Issue 'headline)))
               (mapc (lambda (data)
                       (org-jira--render-issue-headline issue-id
                                                        filename
                                                        (plist-get data :name)
-                                                       (plist-get data :value)))
+                                                       (lambda ()
+                                                         ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
+                                                         (org-jira-insert
+                                                          (replace-regexp-in-string
+                                                           "^" "  "
+                                                           (format "%s" (plist-get data :value)))))))
 
                     headlines))
 

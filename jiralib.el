@@ -440,6 +440,8 @@ request.el, so if at all possible, it should be avoided."
                                                               :data (json-encode `((jql . ,(first params))
                                                                                    (maxResults . ,(second params)))))))
                                         nil))
+      ('getIssueDevStatus (jiralib--rest-call-it
+                           (format "/rest/dev-status/1.0/issue/detail?issueId=%s&applicationType=%s&dataType=%s" (first params) (second params) (third params))))
       ('getPriorities (jiralib--rest-call-it
                        "/rest/api/2/priority"))
       ('getProjects (jiralib--rest-call-it "rest/api/2/project"))
@@ -1069,6 +1071,10 @@ will cache it."
 (defun jiralib-get-issue (issue-key &optional callback)
   "Get the issue with key ISSUE-KEY, running CALLBACK after."
   (jiralib-call "getIssue" callback issue-key))
+
+(defun jiralib-get-issue-dev-status (issue-id application-type data-type &optional callback)
+  "Return dev status for issue with id ISSUE-ID."
+  (jiralib-call "getIssueDevStatus" callback issue-id application-type data-type))
 
 (defun jiralib-get-issues-from-filter (filter-id)
   "Get the issues from applying saved filter FILTER-ID."
