@@ -163,7 +163,7 @@ where both are strings.  NEW-FILE-NAME is relative to
 `org-jira-working-dir'."
   :group 'org-jira
   :type '(alist :key-type (string :tag "Project key")
-                :value-type (string :tag "File name for this project")))
+          :value-type (string :tag "File name for this project")))
 
 (defcustom org-jira-default-jql
   "assignee = currentUser() and resolution = unresolved ORDER BY
@@ -317,11 +317,11 @@ See `org-default-priority' for more info."
 (defcustom org-jira-custom-jqls
   '(
     (:jql " assignee = currentUser() and createdDate < '2019-01-01' order by created DESC "
-          :limit 100
-          :filename "last-years-work")
+     :limit 100
+     :filename "last-years-work")
     (:jql " assignee = currentUser() and createdDate >= '2019-01-01' order by created DESC "
-          :limit 100
-          :filename "this-years-work")
+     :limit 100
+     :filename "this-years-work")
     )
   "A list of plists with :jql and :filename keys to run arbitrary user JQL."
   :group 'org-jira
@@ -333,10 +333,89 @@ See `org-default-priority' for more info."
   :type 'boolean)
 
 (defcustom org-jira-update-issue-details-include-reporter t
-  "For Jira Cloud API we will get an error if `reporter' is sent with an update request."
+  "For Jira Cloud API we will get an error if `reporter' is sent with an update request.
   :group 'org-jira
   :type 'string)
 
+(defcustom org-jira-issue-custom-fields-alist '()
+  "An alist of plists containing custom fields to add to issues.
+
+  A sample value might be
+  '((customfield_10033 . (:type string :location 'headline))
+    (customfield_10108 . (:type number :location 'property :name \"Priority\"))).
+
+  List of properties for each plist:
+  :type - Type of the field (required). Built-in types are 'string, 'boolean or
+  'number. You can define custom types inside
+  `org-jira-custom-field-encoders'.
+  :location - A symbol, either 'property to format the field as an Org
+  property, or 'headline to place it under a headline. If nil,
+  defaults to 'property.
+  :name - Name to display in the org properties list. If nil, the name
+  parameter of the custom field as returned by the Jira API is used.
+  The name must be unique across existing org-jira property names and
+  other custom field names."
+  :group 'org-jira
+  :type '(alist :value-type plist))
+
+(defcustom org-jira-issue-field-show-null-values nil
+  "If non-nil, always show null values in the properties list,
+  The value is substituted as `org-jira-issue-field-null-value'."
+  :group 'org-jira
+  :type 'boolean)
+
+(defcustom org-jira-issue-field-null-value "null"
+  "String to substitute for a null value when encoding/decoding custom fields."
+  :group 'org-jira
+  :type 'string)
+
+(defcustom org-jira-issue-custom-field-types-alist '()
+  "An alist of plists containing custom field type handlers.
+
+  A sample value might be
+  '((multicheckboxes . (:encode #'my-encoder :decode #'my-decoder)))
+
+  Encoding functions take a JSON value and return a string.
+  Decoding functions take a string and return a JSON value."
+  :group 'org-jira
+  :type '(alist :value-type plist))
+
+(defcustom org-jira-issue-field-overrides-alist '()
+  "Alist mapping `org-mode' field names to Jira issue field IDs.
+  The car of each element is the org-jira field name.
+  The cdr of each element is the Jira issue field ID as returned by the API.
+
+  This is useful if your organization uses a custom field for the
+  issue description or other \"built-in\" field instead of the default.
+
+  A sample value might be
+  '((description . customfield_10000)
+    (summary . customfield_10001)
+    (duedate . customfield_10002)).
+
+  Valid org-jira fields you can use:
+  - assignee
+  - components
+  - labels
+  - created
+  - description
+  - duedate
+  - project
+  - summary
+  - priority
+  - project
+  - reporter
+  - resolution
+  - sprint
+  - start-date
+  - status
+  - summary
+  - issuetype
+  - updated"
+  :group 'org-jira
+  :type '(alist :key-type symbol :value-type symbol))
+
+======= end
 (defvar org-jira-serv nil
   "Parameters of the currently selected blog.")
 
@@ -431,6 +510,45 @@ See `org-default-priority' for more info."
 (defun org-jira--get-proj-key-from-issue (Issue)
   "Get the proper proj-key from an ISSUE instance."
   (oref Issue filename))
+
+(defun org-jira--org->api-field-id (org-name)
+  "Convert an org-jira slot name ORG-NAME to a Jira API field ID."
+  (-if-let (org-id-pair (assoc org-name org-jira-issue-field-overrides-alist))
+      (cdr org-id-pair)
+    org-name))
+
+(defun org-jira--api->org-field-id (jira-id)
+  "Convert a Jira API field ID JIRA-ID to an org-jira slot name.
+
+  Used to override the default description/etc. fields with custom fields."
+  (-if-let (org-id-pair (rassoc jira-id org-jira-issue-field-overrides-alist))
+      (car org-id-pair)
+    jira-id))
+
+(defconst org-jira--default-field-properties
+  '(:location 'property :name nil :writeable nil :type nil))
+
+(defun org-jira--get-custom-field-property (id prop)
+  "Gets the Org type of a custom field with ID."
+  (let ((plist (-if-let (pl (assoc id org-jira-issue-custom-fields-alist))
+                   (cdr pl)
+                 org-jira--default-field-properties)))
+    (cadr (plist-get plist prop))))
+
+(defun org-jira--get-default-property-name (id)
+  "Gets the default name for field ID."
+  (-when-let (name (alist-get (symbol-name id) (jiralib-get-issue-fields) nil nil #'string-equal))
+    (string-replace " " "-" name)))
+
+(defun org-jira--get-custom-field-name (id &optional ensure)
+  "Gets the name of a custom field with ID."
+  (let* ((id-str (symbol-name id))
+         (name (or (org-jira--get-custom-field-property id :name)
+                   (org-jira--get-default-property-name id)))
+         (result (or name id-str)))
+    (if (and (not name) ensure)
+        (error "Field ID %s has no name defined" id))
+    (or (assoc-default result org-jira-property-overrides) result)))
 
 ;; TODO: Merge these 3 ensure macros (or, scrap all but ones that work on Issue)
 (defmacro ensure-on-issue-id (issue-id &rest body)
@@ -575,14 +693,14 @@ See `org-default-priority' for more info."
 ;;;###autoload
 (define-minor-mode org-jira-mode
   "Toggle org-jira mode.
-With no argument, the mode is toggled on/off.
-Non-nil argument turns mode on.
-Nil argument turns mode off.
+  With no argument, the mode is toggled on/off.
+  Non-nil argument turns mode on.
+  Nil argument turns mode off.
 
-Commands:
-\\{org-jira-entry-mode-map}
+  Commands:
+  \\{org-jira-entry-mode-map}
 
-Entry to this mode calls the value of `org-jira-mode-hook'."
+  Entry to this mode calls the value of `org-jira-mode-hook'."
 
   :init-value nil
   :lighter " jira"
@@ -598,8 +716,8 @@ Entry to this mode calls the value of `org-jira-mode-hook'."
 
 (defun org-jira-maybe-activate-mode ()
   "Having hooks can be an expensive operation, and they are invoked each
-time the mode is started - we should only ever re-activate the mode if
-it isn't already on."
+  time the mode is started - we should only ever re-activate the mode if
+  it isn't already on."
   (unless (bound-and-true-p org-jira-mode) (org-jira-mode t)))
 
 (defun org-jira-get-project-name (proj)
@@ -655,10 +773,10 @@ it isn't already on."
 (defun org-jira-entry-put (pom property value)
   "Similar to org-jira-entry-put, but with an optional alist of overrides.
 
-At point-or-marker POM, set PROPERTY to VALUE.
+  At point-or-marker POM, set PROPERTY to VALUE.
 
-Look at customizing org-jira-property-overrides if you want
-to change the property names this sets."
+  Look at customizing org-jira-property-overrides if you want
+  to change the property names this sets."
   (unless (stringp property)
     (setq property (symbol-name property)))
   (let ((property (or (assoc-default property org-jira-property-overrides)
@@ -740,8 +858,8 @@ to change the property names this sets."
 (defun org-jira-decode (data)
   "Decode text DATA.
 
-It must receive a coercion to string, as not every time will it
-be populated."
+  It must receive a coercion to string, as not every time will it
+  be populated."
   (decode-coding-string
    (cl-coerce data 'string) jiralib-coding-system))
 
@@ -752,8 +870,8 @@ be populated."
 (defun org-jira-transform-time-format (jira-time-str)
   "Convert JIRA-TIME-STR to format \"%Y-%m-%d %T\".
 
-Example: \"2012-01-09T08:59:15.000Z\" becomes \"2012-01-09
-16:59:15\", with the current timezone being +0800."
+  Example: \"2012-01-09T08:59:15.000Z\" becomes \"2012-01-09
+  16:59:15\", with the current timezone being +0800."
   (condition-case ()
       (format-time-string
        "%Y-%m-%d %T"
@@ -790,7 +908,7 @@ Example: \"2012-01-09T08:59:15.000Z\" becomes \"2012-01-09
 
 (defun org-jira-date-to-org-clock (date)
   "Convert DATE into a time stamp and then into org-clock format.
-Expects a date in format such as: 2017-02-26T00:08:00.000-0500."
+  Expects a date in format such as: 2017-02-26T00:08:00.000-0500."
   (org-jira-time-stamp-to-org-clock (date-to-time date)))
 
 (defun org-jira-worklogs-to-org-clocks (worklogs)
@@ -814,12 +932,12 @@ Expects a date in format such as: 2017-02-26T00:08:00.000-0500."
 
 (defun org-jira-format-clock (clock-entry)
   "Format a CLOCK-ENTRY given the (list start end).
-This format is typically generated from org-jira-worklogs-to-org-clocks call."
+  This format is typically generated from org-jira-worklogs-to-org-clocks call."
   (format "CLOCK: [%s]--[%s]" (car clock-entry) (cadr clock-entry)))
 
 (defun org-jira-insert-clock (clock-entry)
   "Insert a CLOCK-ENTRY given the (list start end).
-This format is typically generated from org-jira-worklogs-to-org-clocks call."
+  This format is typically generated from org-jira-worklogs-to-org-clocks call."
   (insert (org-jira-format-clock clock-entry))
   (org-beginning-of-line)
   (org-ctrl-c-ctrl-c) ;; @TODO Maybe not call directly?  does it matter? - used to resync the clock estimate
@@ -831,7 +949,7 @@ This format is typically generated from org-jira-worklogs-to-org-clocks call."
 
 (defun org-jira-logbook-reset (issue-id filename &optional clocks)
   "Find logbook for ISSUE-ID in FILENAME, delete it.
-Re-create it with CLOCKS.  This is used for worklogs."
+  Re-create it with CLOCKS.  This is used for worklogs."
   (interactive)
   (let ((existing-logbook-p nil))
     ;; See if the LOGBOOK already exists or not.
@@ -905,9 +1023,9 @@ Re-create it with CLOCKS.  This is used for worklogs."
 (defun org-jira-get-issue-list (&optional callback)
   "Get list of issues, using jql (jira query language), invoke CALLBACK after.
 
-Default is unresolved issues assigned to current login user; with
-a prefix argument you are given the chance to enter your own
-jql."
+  Default is unresolved issues assigned to current login user; with
+  a prefix argument you are given the chance to enter your own
+  jql."
   (org-jira-log (format "I was called, was it with a callback? %s" (if callback "yes" "no")))
   (let ((jql org-jira-default-jql))
     (when current-prefix-arg
@@ -954,10 +1072,10 @@ jql."
 (defun org-jira-get-issues-headonly (issues)
   "Get list of ISSUES, head only.
 
-The default behavior is to return issues assigned to you and unresolved.
+  The default behavior is to return issues assigned to you and unresolved.
 
-With a prefix argument, allow you to customize the jql.  See
-`org-jira-get-issue-list'."
+  With a prefix argument, allow you to customize the jql.  See
+  `org-jira-get-issue-list'."
 
   (interactive
    (org-jira-get-issue-list))
@@ -1007,7 +1125,7 @@ With a prefix argument, allow you to customize the jql.  See
    (lambda (&key data &allow-other-keys)
      "Callback for async, DATA is the response from the request call.
 
-Will send a list of org-jira-sdk-issue objects to the list printer."
+  Will send a list of org-jira-sdk-issue objects to the list printer."
      (org-jira-log "Received data for org-jira-get-issue-list-callback.")
      (--> data
           (org-jira-sdk-path it '(issues))
@@ -1020,7 +1138,7 @@ Will send a list of org-jira-sdk-issue objects to the list printer."
    (lambda (&key data &allow-other-keys)
      "Callback for async, DATA is the response from the request call.
 
-Will send a list of org-jira-sdk-issue objects to the list printer."
+  Will send a list of org-jira-sdk-issue objects to the list printer."
      (org-jira-log "Received data for org-jira-get-sprint-list-callback.")
      (--> data
           (org-jira-sdk-path it '(sprint))
@@ -1033,9 +1151,9 @@ Will send a list of org-jira-sdk-issue objects to the list printer."
 (defun org-jira-get-issues (issues)
   "Get list of ISSUES into an org buffer.
 
-Default is get unfinished issues assigned to you, but you can
-customize jql with a prefix argument.
-See`org-jira-get-issue-list'"
+  Default is get unfinished issues assigned to you, but you can
+  customize jql with a prefix argument.
+  See`org-jira-get-issue-list'"
   ;; If the user doesn't provide a default, async call to build an issue list
   ;; from the JQL style query
   (interactive
@@ -1052,7 +1170,7 @@ See`org-jira-get-issue-list'"
    (lambda (&key data &allow-other-keys)
      "Callback for async, DATA is the response from the request call.
 
-Will send a list of org-jira-sdk-issue objects to the list printer."
+  Will send a list of org-jira-sdk-issue objects to the list printer."
      (org-jira-log "Received data for org-jira-get-issues-from-custom-jql-callback.")
      (--> data
           (org-jira-sdk-path it '(issues))
@@ -1068,13 +1186,13 @@ Will send a list of org-jira-sdk-issue objects to the list printer."
 (defun org-jira-get-issues-from-custom-jql (&optional jql-list)
   "Get JQL-LIST list of issues from a custom JQL and PROJ-KEY.
 
-The PROJ-KEY will act as the file name, while the JQL will be any
-valid JQL to populate a file to store PROJ-KEY results in.
+  The PROJ-KEY will act as the file name, while the JQL will be any
+  valid JQL to populate a file to store PROJ-KEY results in.
 
-Please note that this is *not* concurrent or race condition
-proof.  If you try to run multiple calls to this function, it
-will mangle things badly, as they rely on globals DEFAULT-JQL and
-ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
+  Please note that this is *not* concurrent or race condition
+  proof.  If you try to run multiple calls to this function, it
+  will mangle things badly, as they rely on globals DEFAULT-JQL and
+  ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
   (interactive)
   (let* ((jl (or jql-list org-jira-custom-jqls))
          (uno (car jl))
@@ -1110,7 +1228,109 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
       (re-search-forward top-heading nil 1 1))
     (beginning-of-line)
     (unless (looking-at top-heading)
-      (insert (format "\n* %s-Tickets\n" proj-key)))))
+      (unless (looking-at "^")
+        (insert "\n"))
+      (insert (format "* %s-Tickets\n" proj-key)))))
+
+(defconst org-jira--default-property-slot-names
+  '(filename reporter type type-id priority labels resolution status components created updated sprint)
+  "List of org-jira issue slot names to insert as properties.")
+
+(defconst org-jira--default-headline-slot-names
+  '(description)
+  "List of org-jira issue slot names to insert as headlines.")
+
+(defun org-jira--maybe-decode-field-null (value)
+  "Possibly convert VALUE to a null string representation."
+  (when (or (eq value nil) (eq value :json-null))
+    (if org-jira-issue-field-show-null-values org-jira-issue-field-null-value "")))
+
+(defun org-jira--decode-custom-field (id value)
+  "Formats the custom field ID's VALUE."
+  (-if-let (null-str (org-jira--maybe-decode-field-null value)) null-str
+    (let ((type (org-jira--get-custom-field-property id :type)))
+      (-if-let (type-codec (assoc type org-jira-issue-custom-field-types-alist))
+          (apply (cadr (plist-get (cdr type-codec) :decode)) (list value))
+        (case type
+          ('number (number-to-string value))
+          ('boolean (if (eq t value) "true" "false"))
+          ('string value)
+          (t (error "Unknown custom field type '%s'" type)))))))
+
+(defun org-jira--maybe-encode-field-null (str)
+  "Possibly convert STR to a null value representation."
+  (let ((encode (if org-jira-issue-field-show-null-values
+                    (string= str org-jira-issue-field-null-value)
+                  (string= str ""))))
+    (when encode
+      (if org-jira-issue-field-show-null-values :json-null ""))))
+
+(defun org-jira--encode-custom-field (id str)
+  "Extracts the custom field ID's value from the string STR."
+  (-if-let (null-value (org-jira--maybe-encode-field-null str)) null-value
+    (let ((type (org-jira--get-custom-field-property id :type)))
+      (-if-let (type-codec (assoc type org-jira-issue-custom-field-types-alist))
+          (apply (cadr (plist-get (cdr type-codec) :encode)) (list str))
+        (case type
+          ('number (string-to-number str))
+          ('boolean (if (string-equal str "true") t :json-false))
+          ('string str)
+          (t (error "Unknown custom field type '%s'" type)))))))
+
+(defun org-jira--get-items-to-render (Issue type)
+  (let* ((slot-names (case type
+                       ('property org-jira--default-property-slot-names)
+                       ('headline org-jira--default-headline-slot-names)
+                       (t (error "Unknown item type %s" type))))
+         (slot-values (mapcar (lambda (slot)
+                                (list :name (symbol-name slot)
+                                      :value (slot-value Issue slot)))
+                              slot-names))
+         (custom-fields (slot-value Issue 'custom-fields))
+         (custom-field-ids
+          (cl-remove-if-not (lambda (id) (eq (org-jira--get-custom-field-property id :location) type))
+                            (mapcar 'car org-jira-issue-custom-fields-alist)))
+         (custom-field-values (mapcar (lambda (id)
+                                        (let ((value (cdr (assoc id custom-fields))))
+                                          (list :name (org-jira--get-custom-field-name id)
+                                                :value (org-jira--decode-custom-field id value))))
+                                      custom-field-ids)))
+    (append slot-values custom-field-values)))
+
+(defun org-jira--render-issue-property (name value)
+  "Renders VALUE as an Org property NAME at point."
+  (when (and value (not (string= value "")))
+    (org-jira-entry-put (point) name value)))
+
+(defun org-jira--render-issue-headline (issue-id filename heading body)
+  "Renders HEADING and BODY as an Org headline at point.
+
+  ISSUE-ID and FILENAME allow linking back to the relevant Jira issue."
+  (ensure-on-issue-id-with-filename
+      issue-id filename
+      (let* ((entry-heading
+              (format "%s: [[%s][%s]]"
+                      heading (concat jiralib-url "/browse/" issue-id) issue-id)))
+        (setq p (org-find-exact-headline-in-buffer entry-heading))
+        (if (and p (>= p (point-min))
+                 (<= p (point-max)))
+            (progn
+              (goto-char p)
+              (org-narrow-to-subtree)
+              (goto-char (point-min))
+              (forward-line 1)
+              (delete-region (point) (point-max)))
+          (if (org-goto-first-child)
+              (org-insert-heading)
+            (goto-char (point-max))
+            (org-insert-subheading t))
+          (org-jira-insert entry-heading "\n"))
+
+        ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
+        (org-jira-insert
+         (replace-regexp-in-string
+          "^" "  "
+          (format "%s" body))))))
 
 (defun org-jira--render-issue (Issue)
   "Render single ISSUE."
@@ -1147,11 +1367,13 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
               (org-back-to-heading t)
               (org-set-tags-to (replace-regexp-in-string "-" "_" issue-id)))
             (org-jira-entry-put (point) "assignee" (or (slot-value Issue 'assignee) "Unassigned"))
-            (mapc (lambda (entry)
-                    (let ((val (slot-value Issue entry)))
-                      (when (and val (not (string= val "")))
-                        (org-jira-entry-put (point) (symbol-name entry) val))))
-                  '(filename reporter type type-id priority labels resolution status components created updated sprint))
+
+            (let ((properties (org-jira--get-items-to-render Issue 'property)))
+              (mapc (lambda (plist)
+                      (org-jira--render-issue-property
+                       (plist-get plist :name)
+                       (plist-get plist :value)))
+                    properties))
 
             (org-jira-entry-put (point) "ID" issue-id)
             (org-jira-entry-put (point) "CUSTOM_ID" issue-id)
@@ -1185,12 +1407,7 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
                                                        (org-insert-subheading t))
                                                      (org-jira-insert entry-heading "\n"))
 
-                                                   ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
-                                                   (org-jira-insert
-                                                    (replace-regexp-in-string
-                                                     "^" "  "
-                                                     (format "%s" (slot-value Issue heading-entry)))))))
-             '(description))
+                    headlines))
 
             (when org-jira-download-comments
               (org-jira-update-comments-for-issue Issue)
@@ -1203,14 +1420,40 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
             (when org-jira-worklog-sync-p
               (org-jira-update-worklogs-for-issue issue-id filename))))))))
 
+(defun org-jira--list-duplicates (xs)
+  "Find duplicate elements in list XS."
+  (let ((ys  ()))
+    (while xs
+      (unless (member (car xs) ys) ; Don't check it if already known to be a dup.
+        (when (member (car xs) (cdr xs)) (push (car xs) ys)))
+      (setq xs  (cdr xs)))
+    ys))
+
+(defun org-jira--ensure-no-duplicate-field-names ()
+  "Ensure that the defined custom field names do not overlap with `org-jira' field names."
+  (cl-flet ((get-names (lambda (l &optional ensure) (mapcar (lambda (n) (org-jira--get-custom-field-name n ensure)) l))))
+    (let* ((custom-field-ids (mapcar (lambda (f) (car f)) org-jira-issue-custom-fields-alist))
+           (default-field-ids (mapcar #'org-jira--org->api-field-id
+                                      (append org-jira--default-property-slot-names
+                                              org-jira--default-headline-slot-names)))
+           (default-field-names (get-names default-field-ids))
+           (custom-field-names (get-names custom-field-ids t))
+           (collisions (or (org-jira--list-duplicates custom-field-names)
+                           (cl-intersection default-field-names custom-field-names))))
+      (when collisions
+        (error "Duplicate custom field names in issue: %s" collisions)))))
+
 (defun org-jira--render-issues-from-issue-list (Issues)
   "Add the issues from ISSUES list into the org file(s).
 
-ISSUES is a list of `org-jira-sdk-issue' records."
+  ISSUES is a list of `org-jira-sdk-issue' records."
   ;; FIXME: Some type of loading error - the first async callback does not know about
   ;; the issues existing as a class, so we may need to instantiate here if we have none.
   (when (eq 0 (->> Issues (cl-remove-if-not #'org-jira-sdk-isa-issue?) length))
     (setq Issues (org-jira-sdk-create-issues-from-data-list Issues)))
+
+  ;; Make sure custom fields do not overlap with non-custom fields (slot names for Issue class)
+  (org-jira--ensure-no-duplicate-field-names)
 
   ;; First off, we never ever want to run on non-issues, so check our types early.
   (setq Issues (cl-remove-if-not #'org-jira-sdk-isa-issue? Issues))
@@ -1281,7 +1524,7 @@ ISSUES is a list of `org-jira-sdk-issue' records."
 
 (defun org-jira-worklog-time-from-org-time (org-time)
   "Take in an ORG-TIME and convert it into the portions of a worklog time.
-Expects input in format such as: [2017-04-05 Wed 01:00]--[2017-04-05 Wed 01:46] =>  0:46"
+  Expects input in format such as: [2017-04-05 Wed 01:00]--[2017-04-05 Wed 01:46] =>  0:46"
   (let ((start (replace-regexp-in-string "^\\[\\(.*?\\)\\].*" "\\1" org-time))
         (end (replace-regexp-in-string ".*--\\[\\(.*?\\)\\].*" "\\1" org-time)))
     `((started . ,(org-jira-org-clock-to-date start))
@@ -1498,8 +1741,8 @@ Expects input in format such as: [2017-04-05 Wed 01:00]--[2017-04-05 Wed 01:46] 
 (defun org-jira-delete-subtree ()
   "Derived from org-cut-subtree.
 
-Like that function, without mangling the user's clipboard for the
-purpose of wiping an old subtree."
+  Like that function, without mangling the user's clipboard for the
+  purpose of wiping an old subtree."
   (let (beg end folded (beg0 (point)))
     (org-back-to-heading t) ; take what is really there
     (setq beg (point))
@@ -1756,8 +1999,8 @@ purpose of wiping an old subtree."
 (defun org-jira-read-components (project)
   "Types: string PROJECT : string (csv of components).
 
-Get all the components for the PROJECT such as EX,
-that should be bound to an issue."
+  Get all the components for the PROJECT such as EX,
+  that should be bound to an issue."
   (let (components component)
     (while (not (equal "Done" component))
       (setq component (org-jira-read-component project))
@@ -1869,6 +2112,29 @@ that should be bound to an issue."
          (ticket-struct (org-jira-get-issue-struct project type summary description parent-id)))
     (org-jira-get-issues (list (jiralib-create-subtask ticket-struct)))))
 
+(defun org-jira--get-issue-custom-field-values-from-org ()
+  (mapcar (lambda (id)
+            (let ((str (org-jira-get-issue-val-from-org id)))
+              (cons id (org-jira--encode-custom-field id str))))
+          (mapcar 'car org-jira-issue-custom-fields-alist)))
+
+(defun org-jira--extract-header-text-1 (key)
+  "Extracts header text for KEY recursively."
+  (forward-thing 'whitespace)
+  (if (looking-at (format "%s: " key))
+      (org-trim (org-get-entry))
+    (if (org-get-next-sibling)
+        (org-jira--extract-header-text-1 key)
+      (error "Can not find %s field for this issue" key))))
+
+(defun org-jira--extract-header-text (key)
+  "Extracts the text for the header titled KEY."
+  (org-goto-first-child)
+  (let ((key (if (symbolp key)
+                 (symbol-name key)
+               key)))
+    (org-jira--extract-header-text-1 key)))
+
 (defun org-jira-get-issue-val-from-org (key)
   "Return the requested value by KEY from the current issue."
   ;; There is some odd issue when not using any let-scoping, where myself
@@ -1884,14 +2150,12 @@ that should be bound to an issue."
   ;; See: https://github.com/ahungry/org-jira/issues/319
   ;; See: https://github.com/ahungry/org-jira/issues/296
   ;; See: https://github.com/ahungry/org-jira/issues/316
-  (lexical-let ((my-key key))
+  (lexical-let ((my-key key) (is-custom-field (assoc key org-jira-issue-custom-fields-alist)))
     (ensure-on-issue
-      (cond ((eq my-key 'description)
-             (org-goto-first-child)
-             (forward-thing 'whitespace)
-             (if (looking-at "description: ")
-                 (org-trim (org-get-entry))
-               (error "Can not find description field for this issue")))
+      (cond ((or (eq my-key 'description)
+                 (and is-custom-field (eq (org-jira--get-custom-field-property my-key :location) 'headline)))
+             (if is-custom-field (setq my-key (org-jira--get-custom-field-name my-key)))
+             (org-jira--extract-header-text my-key))
 
             ((eq my-key 'summary)
              (ensure-on-issue
@@ -1907,10 +2171,16 @@ that should be bound to an issue."
 
             ;; default case, just grab the value in the properties block
             (t
+             (when is-custom-field
+               (let ((name (org-jira--get-custom-field-name my-key)))
+                 (setq my-key name
+                       is-custom-field t)))
+
              (when (symbolp my-key)
                (setq my-key (symbol-name my-key)))
 
-             (setq my-key (or (assoc-default my-key org-jira-property-overrides)
+             (setq my-key (or (and (not is-custom-field)
+                                   (assoc-default my-key org-jira-property-overrides))
                               my-key))
 
              ;; This is the "impossible" to hit setq that somehow gets hit without the let
@@ -1941,7 +2211,7 @@ that should be bound to an issue."
 
 (defun org-jira-read-labels (&optional current-labels)
   "Pick multiple labels which will be added or updating existing
-CURRENT-LABELS and save with the jira issue."
+  CURRENT-LABELS and save with the jira issue."
   (unless current-labels (setq current-labels nil))
   (if jiralib-labels-cache
       (completing-read-multiple "Labels: " jiralib-labels-cache nil nil current-labels)
@@ -1967,7 +2237,7 @@ CURRENT-LABELS and save with the jira issue."
 
 (defvar org-jira-rest-fields nil
   "Extra fields are held here for usage between two endpoints.
-Used in org-jira-read-resolution and org-jira-progress-issue calls.")
+  Used in org-jira-read-resolution and org-jira-progress-issue calls.")
 
 (defvar org-jira-resolution-history nil)
 (defun org-jira-read-resolution ()
@@ -1992,9 +2262,9 @@ Used in org-jira-read-resolution and org-jira-progress-issue calls.")
 
 (defun org-jira-refresh-issues-in-buffer-loose ()
   "Iterates over all level 1-2 headings in current buffer, refreshing on issue :ID:.
-It differs with `org-jira-refresh-issues-in-buffer' in that it accepts the current buffer
-and its corresponding filename, regardless of whether it has been previously registered
-as an org-jira project file or not."
+  It differs with `org-jira-refresh-issues-in-buffer' in that it accepts the current buffer
+  and its corresponding filename, regardless of whether it has been previously registered
+  as an org-jira project file or not."
   (interactive)
   (save-excursion
     (save-restriction
@@ -2007,7 +2277,7 @@ as an org-jira project file or not."
 
 (defun org-jira-refresh-issues-in-buffer ()
   "Iterate across all level 1-2 headings in current buffer, refreshing on issue :ID:.
-Where issue-id will be something such as \"EX-22\"."
+  Where issue-id will be something such as \"EX-22\"."
   (interactive)
   (save-excursion
     (save-restriction
@@ -2180,19 +2450,19 @@ Where issue-id will be something such as \"EX-22\"."
 (defun org-jira-build-components-list (project-components org-issue-components)
   "Given PROJECT-COMPONENTS, attempt to build a list.
 
-If the PROJECT-COMPONENTS are nil, this should return:
+  If the PROJECT-COMPONENTS are nil, this should return:
 
   (list components []), which will translate into the JSON:
 
   {\"components\": []}
 
-otherwise it should return:
+  otherwise it should return:
 
   (list components (list (cons id comp-id) (cons name item-name))),
 
   which will translate into the JSON:
 
-{\"components\": [{\"id\": \"comp-id\", \"name\": \"item\"}]}"
+  {\"components\": [{\"id\": \"comp-id\", \"name\": \"item\"}]}"
   (if (not project-components) (vector) ;; Return a blank array for JSON
     (apply 'list
            (cl-mapcan
@@ -2208,18 +2478,49 @@ otherwise it should return:
   "Given string S, remove any priority tags in the brackets."
   (->> s (replace-regexp-in-string "\\[#.*?\\]" "") org-trim))
 
+(defun org-jira--get-update-issue-fields (issue-id &rest rest)
+  (let* ((org-issue-components (org-jira-get-issue-val-from-org 'components))
+         (org-issue-labels (org-jira-get-issue-val-from-org 'labels))
+         (org-issue-description (org-trim (org-jira-get-issue-val-from-org 'description)))
+         (org-issue-priority (org-jira-get-issue-val-from-org 'priority))
+         (org-issue-type (org-jira-get-issue-val-from-org 'type))
+         (org-issue-type-id (org-jira-get-issue-val-from-org 'type-id))
+         (org-issue-assignee (cl-getf rest :assignee (org-jira-get-issue-val-from-org 'assignee)))
+         (org-issue-reporter (cl-getf rest :reporter (org-jira-get-issue-val-from-org 'reporter)))
+         (project (replace-regexp-in-string "-[0-9]+" "" issue-id))
+         (project-components (jiralib-get-components project)))
+
+    ;; Send the update to jira
+    (let* ((default-fields
+             (list (cons
+                    (org-jira--org->api-field-id 'components)
+                    (or (org-jira-build-components-list
+                         project-components
+                         org-issue-components) []))
+                   (cons (org-jira--org->api-field-id 'labels)
+                         (split-string org-issue-labels ",\\s *"))
+                   (cons (org-jira--org->api-field-id 'priority)
+                         (org-jira-get-id-name-alist org-issue-priority
+                                                     (jiralib-get-priorities)))
+                   (cons (org-jira--org->api-field-id 'description)
+                         org-issue-description)
+                   (cons (org-jira--org->api-field-id 'assignee)
+                         (list (cons 'id (jiralib-get-user-account-id project org-issue-assignee))))
+                   (cons (org-jira--org->api-field-id 'reporter)
+                         (list (cons 'id (jiralib-get-user-account-id project org-issue-reporter))))
+                   (cons (org-jira--org->api-field-id 'summary)
+                         (org-jira-strip-priority-tags (org-jira-get-issue-val-from-org 'summary)))
+                   (cons (org-jira--org->api-field-id 'issuetype)
+                         `((id . ,org-issue-type-id)
+                           (name . ,org-issue-type)))))
+           (custom-fields (org-jira--get-issue-custom-field-values-from-org)))
+      (append default-fields custom-fields))))
+
 (defun org-jira-update-issue-details (issue-id filename &rest rest)
   "Update the details of issue ISSUE-ID in FILENAME.  REST will contain optional input."
   (ensure-on-issue-id-with-filename issue-id filename
     ;; Set up a bunch of values from the org content
-    (let* ((org-issue-components (org-jira-get-issue-val-from-org 'components))
-           (org-issue-labels (org-jira-get-issue-val-from-org 'labels))
-           (org-issue-description (org-trim (org-jira-get-issue-val-from-org 'description)))
-           (org-issue-priority (org-jira-get-issue-val-from-org 'priority))
-           (org-issue-type (org-jira-get-issue-val-from-org 'type))
-           (org-issue-type-id (org-jira-get-issue-val-from-org 'type-id))
-           (org-issue-assignee (cl-getf rest :assignee (org-jira-get-issue-val-from-org 'assignee)))
-           (org-issue-reporter (cl-getf rest :reporter (org-jira-get-issue-val-from-org 'reporter)))
+    (let* ((update-fields (apply #'org-jira--get-update-issue-fields issue-id rest))
            (project (replace-regexp-in-string "-[0-9]+" "" issue-id))
            (project-components (jiralib-get-components project)))
 
@@ -2277,6 +2578,19 @@ otherwise it should return:
       )))
 
 
+      ;; TODO: We need some way to handle things like assignee setting
+      ;; and refreshing the proper issue in the proper buffer/filename.
+      (jiralib-update-issue
+       issue-id
+       update-fields
+       ;; This callback occurs on success
+       (org-jira-with-callback
+         (message (format "Issue '%s' updated!" issue-id))
+         (jiralib-get-issue
+          issue-id
+          (org-jira-with-callback
+            (org-jira-log "Update get issue for refresh callback hit.")
+            (-> cb-data list org-jira-get-issues))))))))
 
 (defun org-jira-parse-issue-id ()
   "Get issue id from org text."
@@ -2319,10 +2633,10 @@ otherwise it should return:
 (defun org-jira-get-from-org (type entry)
   "Get an org property from the current item.
 
-TYPE is the type to of the current item, and can be 'issue, or 'comment.
+  TYPE is the type to of the current item, and can be 'issue, or 'comment.
 
-ENTRY will vary, and is the name of the property to return.  If
-it is a symbol, it will be converted to string."
+  ENTRY will vary, and is the name of the property to return.  If
+  it is a symbol, it will be converted to string."
   (when (symbolp entry)
     (setq entry (symbol-name entry)))
   (cond
@@ -2429,8 +2743,8 @@ it is a symbol, it will be converted to string."
 (defun org-jira-get-issues-from-filter (filter)
   "Get issues from the server-side stored filter named FILTER.
 
-Provide this command in case some users are not able to use
-client side jql (maybe because of JIRA server version?)."
+  Provide this command in case some users are not able to use
+  client side jql (maybe because of JIRA server version?)."
   (interactive
    (list (completing-read "Filter: " (mapcar 'cdr (jiralib-get-saved-filters)))))
   (org-jira-get-issues (jiralib-get-issues-from-filter (car (rassoc filter (jiralib-get-saved-filters))))))
@@ -2438,7 +2752,7 @@ client side jql (maybe because of JIRA server version?)."
 ;;;###autoload
 (defun org-jira-get-issues-from-filter-headonly (filter)
   "Get issues *head only* from saved filter named FILTER.
-See `org-jira-get-issues-from-filter'."
+  See `org-jira-get-issues-from-filter'."
   (interactive
    (list (completing-read "Filter: " (mapcar 'cdr (jiralib-get-saved-filters)))))
   (org-jira-get-issues-headonly (jiralib-get-issues-from-filter (car (rassoc filter (jiralib-get-saved-filters))))))
@@ -2480,7 +2794,7 @@ See `org-jira-get-issues-from-filter'."
 
 (defun org-jira-get-board-limit (id)
   "Get limit for number of retrieved issues for a board
-id - integer board id"
+  id - integer board id"
   (let ((board (org-jira--get-board-from-buffer id)))
     (if (and board (slot-boundp board 'limit))
         (oref board limit)
@@ -2508,7 +2822,7 @@ id - integer board id"
 (defun org-jira--render-boards-from-list (boards)
   "Add the boards from list into the org file.
 
-boards -  list of `org-jira-sdk-board' records."
+  boards -  list of `org-jira-sdk-board' records."
   (mapc 'org-jira--render-board  boards))
 
 
